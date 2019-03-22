@@ -3,9 +3,9 @@
  *  Nano Dimmer (Aeotec Inc)
  *
  *	github: Eric Maycock (erocm123) -> Converted to Nano Dimmer custom device handler
- *	email: erocmail@gmail.com / ccheng@aeon-labs.com (Modified Code)
- *	Date: 2018-01-02 3:07PM
- *	Copyright Eric Maycock
+ *	email: erocmail@gmail.com / ccheng@aeon-labs.com (Modified Code) / dale@hidale.com (Modified Code)
+ *	Date: 2019-03-22T18:39Z
+ *	Copyright Eric Maycock, Dale Phurrough
  *
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
@@ -41,7 +41,11 @@ metadata {
 	}
 
     preferences {
-        input description: "Once you change values on this page, the corner of the \"configuration\" icon will change orange until all configuration parameters are updated.", title: "Settings", displayDuringSetup: false, type: "paragraph", element: "paragraph"
+        input description: "Once you change values on this page, the corner of the \"configuration\" icon will change orange until all configuration parameters are updated.",
+            title: "Settings",
+            displayDuringSetup: false,
+            type: "paragraph",
+            element: "paragraph"
 		generate_preferences(configuration_model())
     }
 
@@ -64,26 +68,28 @@ metadata {
            		attributeState "statusText", label:'${currentValue}'
             }
 	    }
-		standardTile("refresh", "device.switch", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
-			state "default", label:'', action:"refresh.refresh", icon:"st.secondary.refresh"
-		}
-        valueTile("power", "device.power", decoration: "flat", width: 2, height: 2) {
+		valueTile("power", "device.power", decoration: "flat", width: 2, height: 2) {
 			state "default", label:'${currentValue} W'
 		}
 		valueTile("energy", "device.energy", decoration: "flat", width: 2, height: 2) {
 			state "default", label:'${currentValue} kWh'
 		}
-		standardTile("reset", "device.energy", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
-			state "default", label:'reset kWh', action:"reset"
+        valueTile("wireLoad", "wireLoad", decoration: "flat", width: 2, height: 2) {
+			state "val", label:'${currentValue}', defaultState: true
+		}
+		standardTile("refresh", "device.switch", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
+			state "default", label:'', action:"refresh.refresh", icon:"st.secondary.refresh"
 		}
         standardTile("configure", "device.needUpdate", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
             state "NO" , label:'', action:"configuration.configure", icon:"st.secondary.configure"
             state "YES", label:'', action:"configuration.configure", icon:"https://github.com/erocm123/SmartThingsPublic/raw/master/devicetypes/erocm123/qubino-flush-1d-relay.src/configure@2x.png"
         }
-
+        standardTile("reset", "device.energy", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
+			state "default", label:'reset kWh', action:"reset"
+		}
 
 		main "switch"
-		details (["switch", "power", "energy", "refresh", "configure", "reset"])
+		details (["switch", "power", "energy", "wireLoad", "refresh", "configure", "reset"])
 	}
 }
 
@@ -117,7 +123,7 @@ def zwaveEvent(physicalgraph.zwave.commands.basicv1.BasicReport cmd) {
         events << createEvent(name: "switchLevel", value: cmd.value)
 	}
 
-    def request = update_needed_settings()
+    def request = update_settings_on_device()
 
     if(request != []){
         return [response(commands(request)), events]
@@ -263,6 +269,7 @@ def setLevel(level) {
 	commands(cmds)
 }
 
+// called after the preferences page is closed
 def updated()
 {
     state.enableDebugging = settings.enableDebugging
@@ -270,7 +277,7 @@ def updated()
     sendEvent(name: "checkInterval", value: 2 * 30 * 60 + 2 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
     state.needfwUpdate = ""
 
-    def cmds = update_needed_settings()
+    def cmds = update_settings_on_device()
 
     sendEvent(name:"needUpdate", value: device.currentValue("needUpdate"), displayed:false, isStateChange: true)
 
@@ -292,16 +299,19 @@ private commands(commands, delay=1500) {
 def generate_preferences(configuration_model)
 {
     def configuration = parseXml(configuration_model)
-
     configuration.Value.each
     {
+        if (!it.@readonly.isEmpty() && it.@readonly.toBoolean()) {
+            return;
+        }
+        def preselectedValue = it.@value.isEmpty() ? null : "${it.@value}"
         switch(it.@type)
         {
             case ["byte","short","four"]:
                 input "${it.@index}", "number",
                     title:"${it.@label}\n" + "${it.Help}",
                     range: "${it.@min}..${it.@max}",
-                    defaultValue: "${it.@value}",
+                    defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}"
             break
             case "list":
@@ -309,7 +319,7 @@ def generate_preferences(configuration_model)
                 it.Item.each { items << ["${it.@value}":"${it.@label}"] }
                 input "${it.@index}", "enum",
                     title:"${it.@label}\n" + "${it.Help}",
-                    defaultValue: "${it.@value}",
+                    defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}",
                     options: items
             break
@@ -317,13 +327,13 @@ def generate_preferences(configuration_model)
                input "${it.@index}", "decimal",
                     title:"${it.@label}\n" + "${it.Help}",
                     range: "${it.@min}..${it.@max}",
-                    defaultValue: "${it.@value}",
+                    defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}"
             break
             case "boolean":
                input "${it.@index}", "boolean",
                     title:"${it.@label}\n" + "${it.Help}",
-                    defaultValue: "${it.@value}",
+                    defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}"
             break
         }
@@ -331,15 +341,43 @@ def generate_preferences(configuration_model)
 }
 
 
-def update_current_properties(cmd)
+def update_tiles() {
+    def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
+    def wireLoadText = ""
+    if (cachedDeviceParameters?."128" != null) {
+        def wireValue = convertParam(128, cmd2Integer(cachedDeviceParameters?."128"))
+        if (wireValue > 0) wireLoadText = (wireValue == 1 ? "2-wire\n" : "3-wire\n")
+    }
+    if (cachedDeviceParameters?."130" != null) {
+        def loadValue = convertParam(130, cmd2Integer(cachedDeviceParameters?."130"))
+        if (loadValue > 0) wireLoadText = wireLoadText + (loadValue == 1 ? "Resistive\n" : loadValue == 2 ? "Capacitive\n" : "Inductive\n")
+    }
+    if (cachedDeviceParameters?."129" != null) {
+        def edgeValue = convertParam(129, cmd2Integer(cachedDeviceParameters?."129"))
+        wireLoadText = wireLoadText + (edgeValue == 0 ? "Trailing-edge" : "Leading-edge")
+    }
+    wireLoadText = wireLoadText.trim()
+    if (wireLoadText != "") sendEvent(name: "wireLoad", value: wireLoadText, displayed:false)
+}
+
+def update_cached_device_parameters(cmd)
 {
-    def currentProperties = state.currentProperties ?: [:]
+    def cmdParamNum = "${cmd.parameterNumber}".toInteger()
+    def cmdParamValue = cmd2Integer(cmd.configurationValue)
+    def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
+    cachedDeviceParameters."${cmd.parameterNumber}" = cmd.configurationValue
 
-    currentProperties."${cmd.parameterNumber}" = cmd.configurationValue
+    def configuration = parseXml(configuration_model())
+    def matched_configuration_model = configuration.Value
+        .find {it.@index.toInteger() == cmdParamNum}
+    def readonly_parameter = false
+    if (!matched_configuration_model.@readonly.isEmpty() && matched_configuration_model.@readonly.toBoolean()) {
+        readonly_parameter = true
+    }
 
-    if (settings."${cmd.parameterNumber}" != null)
+    if ((readonly_parameter == false) && (settings."${cmd.parameterNumber}" != null))
     {
-        if (settings."${cmd.parameterNumber}".toInteger() == convertParam("${cmd.parameterNumber}".toInteger(), cmd2Integer(cmd.configurationValue)))
+        if (settings."${cmd.parameterNumber}".toInteger() == convertParam(cmdParamNum, cmdParamValue))
         {
             sendEvent(name:"needUpdate", value:"NO", displayed:false, isStateChange: true)
         }
@@ -349,13 +387,16 @@ def update_current_properties(cmd)
         }
     }
 
-    state.currentProperties = currentProperties
+    state.cachedDeviceParameters = cachedDeviceParameters
+    if ([128, 129, 130].contains(cmdParamNum)) {
+        update_tiles()
+    }
 }
 
-def update_needed_settings()
+def update_settings_on_device()
 {
     def cmds = []
-    def currentProperties = state.currentProperties ?: [:]
+    def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
 
     def configuration = parseXml(configuration_model())
     def isUpdateNeeded = "NO"
@@ -379,7 +420,7 @@ def update_needed_settings()
     {
        if ("${it.@setting_type}" == "zwave"){
        //logging("Flag Placement")
-            if (currentProperties."${it.@index}" == null)
+            if (cachedDeviceParameters."${it.@index}" == null)
             {
             //logging("Flag Placement") - Seems to fail here (FAIL)
                 if (device.currentValue("currentFirmware") == null || "${it.@fw}".indexOf(device.currentValue("currentFirmware")) >= 0){
@@ -388,7 +429,11 @@ def update_needed_settings()
                     cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
                 }
             }
-            else if (settings."${it.@index}" != null && convertParam(it.@index.toInteger(), cmd2Integer(currentProperties."${it.@index}")) != settings."${it.@index}".toInteger())
+            else if (!it.@readonly.isEmpty() && it.@readonly.toBoolean()) {
+                logging("Device parameter ${it.@index} is read-only, request current value from device")
+                cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
+            }
+            else if (settings."${it.@index}" != null && (convertParam(it.@index.toInteger(), cmd2Integer(cachedDeviceParameters."${it.@index}")) != settings."${it.@index}".toInteger()))
             {
             //logging("Flag Placement")
                 //if (device.currentValue("currentFirmware") == null || "${it.@fw}".indexOf(device.currentValue("currentFirmware")) >= 0){
@@ -411,8 +456,7 @@ def update_needed_settings()
 * Convert 1 and 2 bytes values to integer
 */
 def cmd2Integer(array) {
-
-switch(array.size()) {
+    switch(array.size()) {
 	case 1:
 		array[0]
     break
@@ -455,13 +499,13 @@ def integer2Cmd(value, size) {
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.configurationv1.ConfigurationReport cmd) {
-     update_current_properties(cmd)
-     logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is set to '${cmd2Integer(cmd.configurationValue)}'")
+     update_cached_device_parameters(cmd)
+     logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.configurationv2.ConfigurationReport cmd) {
-     update_current_properties(cmd)
-     logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is set to '${cmd2Integer(cmd.configurationValue)}'")
+     update_cached_device_parameters(cmd)
+     logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.firmwareupdatemdv2.FirmwareMdReport cmd){
@@ -479,12 +523,13 @@ def zwaveEvent(physicalgraph.zwave.commands.firmwareupdatemdv2.FirmwareMdReport 
     createEvent(name: "currentFirmware", value: firmwareVersion)
 }
 
+// called one-time when the device is joined
 def configure() {
     state.enableDebugging = settings.enableDebugging
     logging("Configuring Device For SmartThings Use")
     def cmds = []
 
-    cmds = update_needed_settings()
+    cmds = update_settings_on_device()
 
     if (cmds != []) commands(cmds)
     //else logging("Configuring Device Failed")
@@ -545,7 +590,7 @@ def configuration_model()
             0 - Disable
             1 - Enable
             Range: 0~1
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
             <Item label="Disable" value="0" />
             <Item label="Enable" value="1" />
@@ -557,7 +602,7 @@ def configuration_model()
             1 - Always ON
             2 - Always OFF
             Range: 0~2
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
             <Item label="Last Status" value="0" />
             <Item label="Always On" value="1" />
@@ -572,7 +617,7 @@ def configuration_model()
             3 - Multilevel Switch Report (Used for Dimmers status reports)
             4 - Hail CC when external switch is used to change status of either load.
             Range: 0~4
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
             <Item label="None" value="0" />
             <Item label="Hail CC" value="1" />
@@ -586,7 +631,7 @@ def configuration_model()
             0 = Send Nothing
             1 = Basic Set CC.
             Range: 0~1
-            Default: 1 (Previous State)
+            Default: 1
         </Help>
             <Item label="Nothing" value="0" />
             <Item label="Basic Set CC" value="1" />
@@ -597,34 +642,34 @@ def configuration_model()
             0 = Send Nothing
             1 = Basic Set CC.
             Range: 0~1
-            Default: 1 (Previous State)
+            Default: 1
         </Help>
             <Item label="Nothing" value="0" />
             <Item label="Basic Set CC" value="1" />
       </Value>
-      <Value type="list" byteSize="1" index="90" label="Threshold Enable/Disable" min="0" max="1" value="1" setting_type="zwave" fw="">
+      <Value type="list" byteSize="1" index="90" label="Watt Threshold Enable/Disable" min="0" max="1" value="1" setting_type="zwave" fw="">
         <Help>
-       		Enables/disables parameter 91 and 92 below:
+       		Enables/disables both watt thresholds below:
             0 = disabled
             1 = enabled
             Range: 0~1
-            Default: 1 (Previous State)
+            Default: 1
         </Help>
             <Item label="Disable" value="0" />
             <Item label="Enable" value="1" />
       </Value>
-      <Value type="byte" byteSize="4" index="91" label="Watt Threshold" min="0" max="60000" value="25" setting_type="zwave" fw="">
+      <Value type="byte" byteSize="4" index="91" label="Watt Absolute Threshold" min="0" max="60000" value="25" setting_type="zwave" fw="">
         <Help>
        		The value here represents minimum change in wattage (in terms of wattage) for a REPORT to be sent (Valid values 0-60000).
             Range: 0~60000
-            Default: 25 (Previous State)
+            Default: 25
         </Help>
       </Value>
-      <Value type="byte" byteSize="1" index="92" label="kWh Threshold" min="0" max="100" value="5" setting_type="zwave" fw="">
+      <Value type="byte" byteSize="1" index="92" label="Watt Percent Threshold" min="0" max="100" value="5" setting_type="zwave" fw="">
         <Help>
        		The value here represents minimum change in wattage percent (in terms of percentage %) for a REPORT to be sent.
             Range: 0~100
-            Default: 5 (Previous State)
+            Default: 5
         </Help>
       </Value>
       <Value type="byte" byteSize="4" index="101" label="(Group 1) Timed Automatic Reports" min="0" max="255" value="12" setting_type="zwave" fw="">
@@ -637,7 +682,7 @@ def configuration_model()
                 8 = kWh
             Example: If you want only Watt and kWh to report, sum the value identifiers together for Watt and kWh. 8 + 4 = 12, therefore entering 12 into this setting will give you Watt + kWh reports if set.
             Range: 0~255
-            Default: 12 (Previous State)
+            Default: 12
         </Help>
       </Value>
       <Value type="byte" byteSize="4" index="102" label="(Group 2) Timed Automatic Reports" min="0" max="255" value="0" setting_type="zwave" fw="">
@@ -650,7 +695,7 @@ def configuration_model()
                 8 = kWh
             Example: If you want only Voltage and Current to report, sum the value identifiers together for Voltage + Current. 1 + 2 = 3, therefore entering 3 into this setting will give you Voltage + Current reports if set.
             Range: 0~255
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
       </Value>
       <Value type="byte" byteSize="4" index="103" label="(Group 3) Timed Automatic Reports" min="0" max="255" value="0" setting_type="zwave" fw="">
@@ -663,28 +708,28 @@ def configuration_model()
                 8 = kWh
             Example: If you want all values to report, sum the value identifiers together for Voltage + Current + Watt + kWh. 1 + 2 + 4 + 8 = 15, therefore entering 15 into this setting will give you Voltage + Current + Watt + kWh reports if set.
             Range: 0~255
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
       </Value>
       <Value type="byte" byteSize="4" index="111" label="(Group 1) Set Report in Seconds" min="1" max="2147483647" value="240" setting_type="zwave" fw="">
         <Help>
        		Set the interval of automatic report for Report group 1 in (seconds). This controls (Group 1) Timed Automatic Reports.
             Range: 0~2147483647
-            Default: 240 (Previous State)
+            Default: 240
         </Help>
       </Value>
       <Value type="byte" byteSize="4" index="112" label="(Group 2) Set Report in Seconds" min="1" max="2147483647" value="3600" setting_type="zwave" fw="">
         <Help>
        		Set the interval of automatic report for Report group 2 in (seconds). This controls (Group 2) Timed Automatic Reports.
             Range: 0~2147483647
-            Default: 3600 (Previous State)
+            Default: 3600
         </Help>
       </Value>
       <Value type="byte" byteSize="4" index="113" label="(Group 3) Set Report in Seconds" min="1" max="2147483647" value="3600" setting_type="zwave" fw="">
         <Help>
        		Set the interval of automatic report for Report group 3 in (seconds). This controls (Group 3) Timed Automatic Reports.
             Range: 0~2147483647
-            Default: 3600 (Previous State)
+            Default: 3600
         </Help>
       </Value>
       <Value type="list" byteSize="1" index="120" label="External Switch S1 Setting" min="0" max="4" value="0" setting_type="zwave" fw="">
@@ -697,7 +742,7 @@ def configuration_model()
             4 = Enter automatic identification mode. //can enter this mode by tapping internal button 4x times within 2 seconds.
             Note: When the mode is determined, this mode value will not be reset after exclusion.
             Range: 0~4
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
             <Item label="Unidentified" value="0" />
             <Item label="2-State Switch Mode" value="1" />
@@ -715,7 +760,7 @@ def configuration_model()
             4 = Enter automatic identification mode. //can enter this mode by tapping internal button 6x times within 2 seconds.
             Note: When the mode is determined, this mode value will not be reset after exclusion.
             Range: 0~4
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
             <Item label="Unidentified" value="0" />
             <Item label="2-State Switch Mode" value="1" />
@@ -730,7 +775,7 @@ def configuration_model()
             2 = control the other nodes.
             3 = control the output loads of itself and other nodes.
             Range: 1~3
-            Default: 0 (Previous State)
+            Default: 3
         </Help>
             <Item label="Control Load Only" value="1" />
             <Item label="Control other Nodes Only" value="2" />
@@ -743,7 +788,7 @@ def configuration_model()
             2 = control the other nodes.
             3 = control the output loads of itself and other nodes.
             Range: 1~3
-            Default: 0 (Previous State)
+            Default: 3
         </Help>
             <Item label="Control Load Only" value="1" />
             <Item label="Control other Nodes Only" value="2" />
@@ -753,15 +798,57 @@ def configuration_model()
         <Help>
        		Set the default dimming rate in seconds.
             Range: 1~255
-            Default: 3 (Previous State)
+            Default: 3
         </Help>
+      </Value>
+      <Value type="list" byteSize="1" index="128" label="Wiring Mode" min="0" max="2" value="0" setting_type="zwave" fw="" readonly="true">
+        <Help>
+            Current auto-detected wiring mode
+            Note: These are READ-ONLY and can not be changed. When detected, it will not be reset after exclusion.
+            0 = Unknown
+            1 = 2-wire mode
+            2 = 3-wire mode
+            Range: 0~2
+            Default: 0
+        </Help>
+            <Item label="Unknown" value="0" />
+            <Item label="2-wire mode" value="1" />
+            <Item label="3-wire mode" value="2" />
+      </Value>
+      <Value type="list" byteSize="1" index="129" label="Dimming Principle" min="0" max="1" setting_type="zwave" fw="">
+        <Help>
+            Set the dimming principle.
+            Note: This will not be reset after exclusion.
+            0 = Trailing-edge mode (often LED loads)
+            1 = Leading-edge mode (often legacy loads)
+            Range: 0~1
+            Default: 1
+        </Help>
+            <Item label="Trailing-edge mode" value="0" />
+            <Item label="Leading-edge mode" value="1" />
+      </Value>
+      <Value type="list" byteSize="1" index="130" label="Load Type" min="0" max="3" value="0" setting_type="zwave" fw="" readonly="true">
+        <Help>
+            Auto-detected load type
+            Note: These are READ-ONLY and can not be changed. When detected, it will not be reset after exclusion.
+            0 = Unknown
+            1 = Resistive load
+            2 = Capacitive load
+            3 = Inductive load
+            Range: 0~3
+            Default: 0
+        </Help>
+            <Item label="Unknown" value="0" />
+            <Item label="Resistive load" value="1" />
+            <Item label="Capacitive load" value="2" />
+            <Item label="Inductive load" value="3" />
       </Value>
       <Value type="byte" byteSize="1" index="131" label="Minimum Dim Setting" min="0" max="99" value="0" setting_type="zwave" fw="">
         <Help>
        		Set the min brightness level that the load can reach to.
             Note: When the level is determined, this level value will not be reset after exclusion.
             Range: 0~99
-            Default: 0 (Previous State)
+            Default: 0
         </Help>
       </Value>
       <Value type="byte" byteSize="1" index="132" label="Maximum Dim Setting" min="0" max="99" value="99" setting_type="zwave" fw="">
@@ -769,21 +856,21 @@ def configuration_model()
        		Set the max brightness level that the load can reach to.
             Note: When the level is determined, this level value will not be reset after exclusion.
             Range: 0~99
-            Default: 99 (Previous State)
+            Default: 99
         </Help>
       </Value>
       <Value type="list" byteSize="1" index="249" label="Auto-load Detection" min="0" max="2" value="2" setting_type="zwave" fw="">
         <Help>
             Set the recognition way of load when Nano Dimmer is powered up from power outage or power cycle.
-            0 = Never recognize the load when power on.
-            1 = Only recognize once when first power on.
-            2 = Recognize the load once power on.
-            Range: 1~3
-            Default: 0 (Previous State)
+            0 = Disable auto-load detection
+            1 = Auto-detect only the first time power is restored to Nano Dimmer
+            2 = Auto-detect every time power is restored to Nano Dimmer
+            Range: 0~2
+            Default: 2
         </Help>
-            <Item label="Never recognize the load when power on." value="0" />
-            <Item label="Only recognize once when first power on." value="1" />
-            <Item label="Recognize the load once power on. " value="2" />
+            <Item label="Disable auto-load detection" value="0" />
+            <Item label="Auto-detect only first time power restored" value="1" />
+            <Item label="Auto-detect every time power restored" value="2" />
       </Value>
 </configuration>
 '''
@@ -792,4 +879,4 @@ def configuration_model()
 //add in parameter at later time:
 	//85-86
 //Left out:
-	//122, 129-130, 252, 255
+	//122, 252, 255
