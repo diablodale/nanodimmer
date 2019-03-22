@@ -430,8 +430,10 @@ def update_settings_on_device()
                 }
             }
             else if (!it.@readonly.isEmpty() && it.@readonly.toBoolean()) {
-                logging("Device parameter ${it.@index} is read-only, request current value from device")
-                cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
+                if (state.lastRefresh == null || (now() - state.lastRefresh > 600000)) {
+                    logging("Device parameter ${it.@index} is read-only, request current value from device")
+                    cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
+                }
             }
             else if (settings."${it.@index}" != null && (convertParam(it.@index.toInteger(), cmd2Integer(cachedDeviceParameters."${it.@index}")) != settings."${it.@index}".toInteger()))
             {
@@ -448,6 +450,7 @@ def update_settings_on_device()
         }
     }
 
+    state.lastRefresh = now()
     sendEvent(name:"needUpdate", value: isUpdateNeeded, displayed:false, isStateChange: true)
     return cmds
 }
@@ -608,7 +611,7 @@ def configuration_model()
             <Item label="Always On" value="1" />
             <Item label="Always Off" value="2" />
       </Value>
-      <Value type="list" byteSize="1" index="80" label="Instant Notification" min="0" max="4" value="0" setting_type="zwave" fw="">
+      <Value type="list" byteSize="1" index="80" label="Instant Notification" min="0" max="4" value="3" setting_type="zwave" fw="">
         <Help>
         Notification report of status change sent to Group Assocation #1 when state of output load changes. Used to instantly update status to your gateway typically.
             0 - Nothing
@@ -617,7 +620,7 @@ def configuration_model()
             3 - Multilevel Switch Report (Used for Dimmers status reports)
             4 - Hail CC when external switch is used to change status of either load.
             Range: 0~4
-            Default: 0
+            Default: 3
         </Help>
             <Item label="None" value="0" />
             <Item label="Hail CC" value="1" />
