@@ -165,7 +165,6 @@ def zwaveEvent(physicalgraph.zwave.commands.associationv2.AssociationReport cmd)
 def zwaveEvent(physicalgraph.zwave.commands.securityv1.SecurityMessageEncapsulation cmd) {
 	def encapsulatedCommand = cmd.encapsulatedCommand([0x20: 1, 0x31: 2, 0x32: 3, 0x70: 1])
 	if (encapsulatedCommand) {
-		state.sec = 1
 		def result = zwaveEvent(encapsulatedCommand)
 		result = result.collect {
 			if (it instanceof physicalgraph.device.HubAction && !it.toString().startsWith("9881")) {
@@ -267,21 +266,6 @@ def setLevel(level) {
     cmds << zwave.switchMultilevelV1.switchMultilevelGet()
 
 	commands(cmds)
-}
-
-// called after the preferences page is closed
-def updated()
-{
-    state.enableDebugging = settings.enableDebugging
-    logging("updated() is being called")
-    sendEvent(name: "checkInterval", value: 2 * 30 * 60 + 2 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
-    state.needfwUpdate = ""
-
-    def cmds = update_settings_on_device()
-
-    sendEvent(name:"needUpdate", value: device.currentValue("needUpdate"), displayed:false, isStateChange: true)
-
-    response(commands(cmds))
 }
 
 private command(physicalgraph.zwave.Command cmd) {
@@ -401,7 +385,7 @@ def update_settings_on_device()
     def configuration = parseXml(configuration_model())
     def isUpdateNeeded = "NO"
 
-    if(!state.needfwUpdate || state.needfwUpdate == ""){
+    if(!state?.needfwUpdate || state?.needfwUpdate == ""){
        logging("Requesting device firmware version")
        cmds << zwave.firmwareUpdateMdV2.firmwareMdGet()
     }
@@ -526,9 +510,19 @@ def zwaveEvent(physicalgraph.zwave.commands.firmwareupdatemdv2.FirmwareMdReport 
     createEvent(name: "currentFirmware", value: firmwareVersion)
 }
 
-// called one-time when the device is joined
+def installed() {
+    log.debug "Nano Dimmer called installed()"
+    state.clear()
+    def zwaveInfo = getZwaveInfo()  // https://community.smartthings.com/t/new-z-wave-fingerprint-format/48204/39
+    if (zwaveInfo.zw.endsWith("s")) {
+        // device was included securely
+        logging("Nano Dimmer included securely")
+        state.sec = 1
+    }
+}
+
+// Event by capability.configuration; called one-time after the device has been assigned a Device Handler
 def configure() {
-    state.enableDebugging = settings.enableDebugging
     logging("Configuring Device For SmartThings Use")
     def cmds = []
 
@@ -536,6 +530,21 @@ def configure() {
 
     if (cmds != []) commands(cmds)
     //else logging("Configuring Device Failed")
+}
+
+// called after the settings/preferences page is saved, and seems also on first install
+// BUGBUG this causes update_settings_on_device() to be called twice on initial install
+def updated()
+{
+    logging("updated() is being called")
+    sendEvent(name: "checkInterval", value: 2 * 30 * 60 + 2 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
+    state.needfwUpdate = ""
+
+    def cmds = update_settings_on_device()
+
+    sendEvent(name:"needUpdate", value: device.currentValue("needUpdate"), displayed:false, isStateChange: true)
+
+    response(commands(cmds))
 }
 
 def convertParam(number, value) {
@@ -579,7 +588,7 @@ def convertParam(number, value) {
 }
 
 private def logging(message) {
-    if (state.enableDebugging == null || state.enableDebugging == "true") log.debug "$message"
+    if (settings == null || settings?.enableDebugging == null || settings?.enableDebugging == "true") log.debug "$message"
 }
 
 
