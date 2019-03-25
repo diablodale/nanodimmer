@@ -340,8 +340,7 @@ def update_tiles() {
         def edgeValue = convertParam(129, cmd2Integer(cachedDeviceParameters?."129"))
         wireLoadText = wireLoadText + (edgeValue == 0 ? "Trailing-edge" : "Leading-edge")
     }
-    wireLoadText = wireLoadText.trim()
-    if (wireLoadText != "") sendEvent(name: "wireLoad", value: wireLoadText, displayed:false)
+    sendEvent(name: "wireLoad", value: wireLoadText.trim(), displayed:false)
 }
 
 def update_cached_device_parameters(cmd)
@@ -521,7 +520,9 @@ def installed() {
     }
 }
 
-// Event by capability.configuration; called one-time after the device has been assigned a Device Handler
+// Event by capability.configuration
+// called: a) one-time after the device has been assigned a Device Handler
+// and     b) when the configure tile is clicked
 def configure() {
     logging("Configuring Device For SmartThings Use")
     def cmds = []
@@ -532,8 +533,8 @@ def configure() {
     //else logging("Configuring Device Failed")
 }
 
-// called after the settings/preferences page is saved, and seems also on first install
-// BUGBUG this causes update_settings_on_device() to be called twice on initial install
+// called after the settings/preferences page is saved
+// BUGBUG aalso on first install, therefore causes update_settings_on_device() to be called twice
 def updated()
 {
     logging("updated() is being called")
