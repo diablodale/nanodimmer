@@ -107,20 +107,8 @@ def parse(String description) {
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.basicv1.BasicReport cmd) {
-    logging("BasicReport: $cmd")
-    def events = []
-    events << createEvent(name: "switch", value: cmd.value ? "on" : "off", displayed: true, isStateChange: true)
-
-    // For a multilevel switch, cmd.value can be from 1-99 to represent dimming levels
-    events << createEvent(name: "level", value: cmd.value, unit:"%",
-        descriptionText:"${device.displayName} dimmed ${cmd.value >= 100 ? 100 : cmd.value}%",
-        displayed: true, isStateChange: true)
-    events
-}
-
-def buttonEvent(button, value) {
-    logging("buttonEvent() Button:$button, Value:$value")
-	createEvent(name: "button", value: value, data: [buttonNumber: button], descriptionText: "$device.displayName button $button was $value", isStateChange: true)
+    logging(cmd)
+    dimmerEvents(cmd)
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.switchmultilevelv3.SwitchMultilevelReport cmd) {
@@ -129,18 +117,27 @@ def zwaveEvent(physicalgraph.zwave.commands.switchmultilevelv3.SwitchMultilevelR
 }
 
 def dimmerEvents(physicalgraph.zwave.Command cmd) {
-	logging(cmd)
 	def result = []
-	def value = (cmd.value ? "on" : "off")
-	def switchEvent = createEvent(name: "switch", value: value, descriptionText: "$device.displayName was turned $value")
+	def switchEvent = createEvent(name: "switch", value: cmd.value ? "on" : "off", displayed: true)
 	result << switchEvent
-	if (cmd.value) {
-		result << createEvent(name: "level", value: cmd.value, unit: "%")
-	}
+
+    // multilevel switch cmd.value can be from 0-99 to represent fully off -> fully on
+    // therefore "dimming levels" for a light are 1-98
+    // App UI will display them as 1-98% with 99% never seen in the UI
+    // 0% dim is the same as completely off, therefore don't update UI to persist the device's saved dimmer level
+    if (cmd.value > 0) {
+        def scaledValue = cmd.value > 98 ? 100 : cmd.value
+        result << createEvent(name: "level", value: scaledValue, unit:"%",
+            descriptionText:"${device.displayName} dimmed ${scaledValue}%",
+            displayed: true)
+    }
+
+    // if switch transitioned on/off, query device for wattage power after 3 seconds
 	if (switchEvent.isStateChange) {
 		result << response(["delay 3000", zwave.meterV2.meterGet(scale: 2).format()])
 	}
-	return result
+
+	result
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.associationv2.AssociationReport cmd) {
@@ -238,23 +235,19 @@ def refresh() {
 
 def ping() {
    	logging("$device.displayName ping()")
-
     def cmds = []
-
     cmds << zwave.meterV2.meterGet(scale: 0)
     cmds << zwave.meterV2.meterGet(scale: 2)
 	cmds << zwave.basicV1.basicGet()
-
     commands(cmds)
 }
 
 def setLevel(level) {
-	if(level > 99) level = 99
-    if(level < 1) level = 1 // TODO investigate 0 or 1 on the Nano Dimmer
+	if (level > 99) level = 99
+    if (level < 1) level = 1 // allows for quick "lowest dim level" in the app UI since it doesn't support the range(..) attribute
     def cmds = []
     cmds << zwave.basicV1.basicSet(value: level)
     cmds << zwave.switchMultilevelV1.switchMultilevelGet()
-
 	commands(cmds)
 }
 
