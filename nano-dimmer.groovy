@@ -2,11 +2,9 @@
  *
  *  Nano Dimmer (Aeotec Inc)
  *
- *	github: Eric Maycock (erocm123) -> Converted to Nano Dimmer custom device handler
+ *	github: Dale Phurrough https://github.com/diablodale/nanodimmer
  *	email: erocmail@gmail.com / ccheng@aeon-labs.com (Modified Code) / dale@hidale.com (Modified Code)
- *	Date: 2019-03-22T18:39Z
- *	Copyright Eric Maycock, Dale Phurrough
- *
+ *	Copyright: Eric Maycock, Dale Phurrough
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  *  in compliance with the License. You may obtain a copy of the License at:
@@ -20,12 +18,11 @@
  */
 
 metadata {
-	definition (name: "Aeotec Inc Nano Dimmer", namespace: "erocm123", author: "Eric Maycock") {
+	definition (name: "Aeotec Inc Nano Dimmer", namespace: "diablodale", author: "Dale Phurrough") {
 		capability "Actuator"
 		capability "Switch"
 		capability "Switch Level"
 		capability "Refresh"
-
 		capability "Sensor"
         capability "Polling"
         capability "Energy Meter"
@@ -40,7 +37,6 @@ metadata {
 
         fingerprint mfr: "0086", prod: "0103", model: "006F"
 		fingerprint deviceId: "0x1101", inClusters: "0x5E,0x25,0x27,0x32,0x81,0x71,0x2C,0x2B,0x70,0x86,0x72,0x73,0x85,0x59,0x98,0x7A,0x5A"
-
 	}
 
     preferences {
@@ -211,11 +207,10 @@ def off() {
 
 def refresh() {
    	logging("$device.displayName refresh()")
-
-    def cmds = []
-    if (state.lastRefresh != null && now() - state.lastRefresh < 5000) {
-        logging("Refresh Double Press")
+    if (state.lastRefresh != null && now() - state.lastRefresh < 3000) {
+        logging("Refresh Double Press - forced query of all known device parameters")
         def configuration = parseXml(configuration_model())
+        def cmds = []
         configuration.Value.each
         {
             if ( "${it.@setting_type}" == "zwave" ) {
@@ -223,18 +218,21 @@ def refresh() {
             }
         }
         cmds << zwave.firmwareUpdateMdV2.firmwareMdGet()
-    } else {
-        cmds << zwave.meterV2.meterGet(scale: 0)
-        cmds << zwave.meterV2.meterGet(scale: 2)
-	    cmds << zwave.basicV1.basicGet()
+        state.lastRefresh = now()
+        commands(cmds)
     }
-
-    state.lastRefresh = now()
-    commands(cmds)
+    else {
+        state.lastRefresh = now()
+        forcedPing()
+    }
 }
 
 def ping() {
    	logging("$device.displayName ping()")
+    forcedPing()
+}
+
+def forcedPing() {
     def cmds = []
     cmds << zwave.meterV2.meterGet(scale: 0)
     cmds << zwave.meterV2.meterGet(scale: 2)
@@ -272,11 +270,12 @@ def generate_preferences(configuration_model)
             return;
         }
         def preselectedValue = it.@value.isEmpty() ? null : "${it.@value}"
+        def trimHelp = it.Help.toString().trim()
         switch(it.@type)
         {
             case ["byte","short","four"]:
                 input "${it.@index}", "number",
-                    title:"${it.@label}\n" + "${it.Help}",
+                    title:"${it.@label}\n" + trimHelp,
                     range: "${it.@min}..${it.@max}",
                     defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}"
@@ -285,21 +284,21 @@ def generate_preferences(configuration_model)
                 def items = []
                 it.Item.each { items << ["${it.@value}":"${it.@label}"] }
                 input "${it.@index}", "enum",
-                    title:"${it.@label}\n" + "${it.Help}",
+                    title:"${it.@label}\n" + trimHelp,
                     defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}",
                     options: items
             break
             case "decimal":
                input "${it.@index}", "decimal",
-                    title:"${it.@label}\n" + "${it.Help}",
+                    title:"${it.@label}\n" + trimHelp,
                     range: "${it.@min}..${it.@max}",
                     defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}"
             break
             case "boolean":
                input "${it.@index}", "boolean",
-                    title:"${it.@label}\n" + "${it.Help}",
+                    title:"${it.@label}\n" + trimHelp,
                     defaultValue: preselectedValue,
                     displayDuringSetup: "${it.@displayDuringSetup}"
             break
@@ -335,7 +334,7 @@ def zwaveEvent(physicalgraph.zwave.commands.configurationv2.ConfigurationReport 
 
 def update_cached_device_parameters(cmd)
 {
-    logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
+    //logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
     def cmdParamNum = "${cmd.parameterNumber}".toInteger()
     def cmdParamValue = cmd2Integer(cmd.configurationValue)
     def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
@@ -368,6 +367,7 @@ def update_cached_device_parameters(cmd)
     }
 }
 
+// Doesn't catch edge cases of changing assocations/parameters outside this device handler
 def update_settings_on_device()
 {
     logging("Nano Dimmer called update_settings_on_device()")
@@ -381,11 +381,14 @@ def update_settings_on_device()
        logging("Requesting device firmware version")
        cmds << zwave.firmwareUpdateMdV2.firmwareMdGet()
     }
-
-    cmds << zwave.associationV1.associationSet(groupingIdentifier:1, nodeId:zwaveHubNodeId)
-    cmds << zwave.associationV1.associationGet(groupingIdentifier:1)
-    cmds << zwave.associationV1.associationSet(groupingIdentifier:2, nodeId:zwaveHubNodeId)
-    cmds << zwave.associationV1.associationGet(groupingIdentifier:2)
+    if (state?.association1 != zwaveHubNodeId) {
+        cmds << zwave.associationV1.associationSet(groupingIdentifier: 1, nodeId: zwaveHubNodeId)
+        cmds << zwave.associationV1.associationGet(groupingIdentifier: 1)
+    }
+    if (state?.association2 != zwaveHubNodeId) {
+        cmds << zwave.associationV1.associationSet(groupingIdentifier: 2, nodeId: zwaveHubNodeId)
+        cmds << zwave.associationV1.associationGet(groupingIdentifier: 2)
+    }
 
     configuration.Value.each
     {
@@ -436,42 +439,43 @@ def cmd2Integer(array) {
 
 def integer2Cmd(value, size) {
 	switch(size) {
-	case 1:
-		[value]
-    break
-	case 2:
-    	def short value1   = value & 0xFF
-        def short value2 = (value >> 8) & 0xFF
-        [value2, value1]
-    break
-    case 3:
-    	def short value1   = value & 0xFF
-        def short value2 = (value >> 8) & 0xFF
-        def short value3 = (value >> 16) & 0xFF
-        [value3, value2, value1]
-    break
-	case 4:
-    	def short value1 = value & 0xFF
-        def short value2 = (value >> 8) & 0xFF
-        def short value3 = (value >> 16) & 0xFF
-        def short value4 = (value >> 24) & 0xFF
-		[value4, value3, value2, value1]
-	break
+        case 1:
+            [value]
+            break
+        case 2:
+            def short value1   = value & 0xFF
+            def short value2 = (value >> 8) & 0xFF
+            [value2, value1]
+            break
+        case 3:
+            def short value1   = value & 0xFF
+            def short value2 = (value >> 8) & 0xFF
+            def short value3 = (value >> 16) & 0xFF
+            [value3, value2, value1]
+            break
+        case 4:
+            def short value1 = value & 0xFF
+            def short value2 = (value >> 8) & 0xFF
+            def short value3 = (value >> 16) & 0xFF
+            def short value4 = (value >> 24) & 0xFF
+            [value4, value3, value2, value1]
+            break
 	}
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.firmwareupdatemdv2.FirmwareMdReport cmd){
     logging("Firmware Report ${cmd.toString()}")
     def firmwareVersion
-    switch(cmd.checksum){
-       case "3281":
-          firmwareVersion = "3.08"
-       break;
-       default:
-          firmwareVersion = cmd.checksum
+    switch(cmd.checksum) {
+        case 19369:    // 0x4BA9
+            firmwareVersion = "v2.02"
+            break
+        default:
+            firmwareVersion = "v????"
     }
+    firmwareVersion = firmwareVersion + " with checksum " + String.format("%04X", cmd.checksum)
     state.needfwUpdate = false
-    createEvent(name: "firmware", value: firmwareVersion.toString(), displayed: false, isStateChange: true)
+    createEvent(name: "firmware", value: firmwareVersion, displayed: false)
 }
 
 def installed() {
@@ -531,6 +535,7 @@ def hasConfigureOpportunity() {
 // bug here? Because 48 / 2 is 24 which is ~22
 def convertParam(number, value) {
 	switch (number){
+        /*
     	case 201:
         	if (value < 0)
             	256 + value
@@ -539,33 +544,9 @@ def convertParam(number, value) {
             else
             	value
         break
-        case 202:
-        	if (value < 0)
-            	256 + value
-        	else if (value > 100)
-            	value - 256
-            else
-            	value
-        break
-        case 203:
-            if (value < 0)
-            	65536 + value
-        	else if (value > 1000)
-            	value - 65536
-            else
-            	value
-        break
-        case 204:
-        	if (value < 0)
-            	256 + value
-        	else if (value > 100)
-            	value - 256
-            else
-            	value
-        break
+        */
         default:
         	value
-        break
     }
 }
 
@@ -870,7 +851,13 @@ def configuration_model()
 '''
 }
 
-//add in parameter at later time:
-	//85-86
-//Left out:
-	//122, 252, 255
+// TODO need to reconcile params and their meaning. The Engineering spec doc (revision 9) has significant differences
+// for example, param 0x7a
+// Engineering writes "Get the state of touch panel port"
+// yet https://aeotec.freshdesk.com/support/solutions/articles/6000198943-how-to-update-nano-dimmer-z-wave-firmware-
+// writes 0x7a was used to set control for S1 and S2 before firmware 2.02, and then changes it further in 2.02
+// reading through both docs, I see that for the intention of "control of S1 and S2"
+// engineering has 0x7b and 0x7c
+// yet same webpage above for firmware 2.02 has 0x7a and 0x7b
+// TODO Add in parameters at later time: 85, 86
+//      Intentionally left out: 122, 252, 255
