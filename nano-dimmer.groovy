@@ -25,7 +25,7 @@ metadata {
 		capability "Switch"
 		capability "Switch Level"
 		capability "Refresh"
-		capability "Configuration"
+
 		capability "Sensor"
         capability "Polling"
         capability "Energy Meter"
@@ -33,7 +33,10 @@ metadata {
         capability "Button"
         capability "Health Check"
 
-        attribute   "needUpdate", "string"
+        attribute  "configureOpportunity", "string"
+        attribute  "firmware", "string"
+
+        command "configure"
 
         fingerprint mfr: "0086", prod: "0103", model: "006F"
 		fingerprint deviceId: "0x1101", inClusters: "0x5E,0x25,0x27,0x32,0x81,0x71,0x2C,0x2B,0x70,0x86,0x72,0x73,0x85,0x59,0x98,0x7A,0x5A"
@@ -64,9 +67,6 @@ metadata {
             tileAttribute ("device.level", key: "SLIDER_CONTROL") {
 				attributeState "level", action:"switch level.setLevel"
 			}
-            tileAttribute ("statusText", key: "SECONDARY_CONTROL") {
-           		attributeState "statusText", label:'${currentValue}'
-            }
 	    }
 		valueTile("power", "device.power", decoration: "flat", width: 2, height: 2) {
 			state "default", label:'${currentValue} W'
@@ -80,9 +80,9 @@ metadata {
 		standardTile("refresh", "device.switch", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
 			state "default", label:'', action:"refresh.refresh", icon:"st.secondary.refresh"
 		}
-        standardTile("configure", "device.needUpdate", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
-            state "NO" , label:'', action:"configuration.configure", icon:"st.secondary.configure"
-            state "YES", label:'', action:"configuration.configure", icon:"https://github.com/erocm123/SmartThingsPublic/raw/master/devicetypes/erocm123/qubino-flush-1d-relay.src/configure@2x.png"
+        standardTile("configure", "device.configureOpportunity", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
+            state "true",  label:'', action:"configure", icon:"https://github.com/erocm123/SmartThingsPublic/raw/master/devicetypes/erocm123/qubino-flush-1d-relay.src/configure@2x.png", defaultState: true
+            state "false", label:'', action:"configure", icon:"st.secondary.configure"
         }
         standardTile("reset", "device.energy", inactiveLabel: false, decoration: "flat", width: 2, height: 2) {
 			state "default", label:'reset kWh', action:"reset"
@@ -94,42 +94,28 @@ metadata {
 }
 
 def parse(String description) {
-	def result = null
+    def result = null
 	if (description.startsWith("Err")) {
-	    result = createEvent(descriptionText:description, isStateChange:true)
+	    result = createEvent(descriptionText: description, isStateChange: true)
 	} else if (description != "updated") {
 		def cmd = zwave.parse(description, [0x20: 1, 0x84: 1, 0x98: 1, 0x56: 1, 0x60: 3])
 		if (cmd) {
 			result = zwaveEvent(cmd)
 		}
 	}
-
-    def statusTextmsg = ""
-    if (device.currentState('power') && device.currentState('energy')) statusTextmsg = "${device.currentState('power').value} W ${device.currentState('energy').value} kWh"
-    sendEvent(name:"statusText", value:statusTextmsg, displayed:false)
-
-	return result
+	result
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.basicv1.BasicReport cmd) {
     logging("BasicReport: $cmd")
     def events = []
-	if (cmd.value == 0) {
-		events << createEvent(name: "switch", value: "off")
-	} else if (cmd.value == 255) {
-		events << createEvent(name: "switch", value: "on")
-	} else {
-		events << createEvent(name: "switch", value: "on")
-        events << createEvent(name: "switchLevel", value: cmd.value)
-	}
+    events << createEvent(name: "switch", value: cmd.value ? "on" : "off", displayed: true, isStateChange: true)
 
-    def request = update_settings_on_device()
-
-    if(request != []){
-        return [response(commands(request)), events]
-    } else {
-        return events
-    }
+    // For a multilevel switch, cmd.value can be from 1-99 to represent dimming levels
+    events << createEvent(name: "level", value: cmd.value, unit:"%",
+        descriptionText:"${device.displayName} dimmed ${cmd.value >= 100 ? 100 : cmd.value}%",
+        displayed: true, isStateChange: true)
+    events
 }
 
 def buttonEvent(button, value) {
@@ -183,19 +169,24 @@ def zwaveEvent(physicalgraph.zwave.Command cmd) {
 
 def zwaveEvent(physicalgraph.zwave.commands.meterv3.MeterReport cmd) {
 	logging(cmd)
+    def events = []
 	if (cmd.meterType == 1) {
-		if (cmd.scale == 0) {
-        	//log.debug "kWh Returned"
-			return createEvent(name: "energy", value: cmd.scaledMeterValue, unit: "kWh")
-		} else if (cmd.scale == 1) {
-			return createEvent(name: "energy", value: cmd.scaledMeterValue, unit: "kVAh")
-		} else if (cmd.scale == 2) {
-        	//log.debug "Watt Returned"
-			return createEvent(name: "power", value: Math.round(cmd.scaledMeterValue), unit: "W")
-		} else {
-			return createEvent(name: "electric", value: cmd.scaledMeterValue, unit: ["pulses", "V", "A", "R/Z", ""][cmd.scale - 3])
-		}
+        switch (cmd.scale)
+        {
+            case 0:
+                events << createEvent(name: "energy", value: cmd.scaledMeterValue, unit: "kWh")
+                break
+            case 1:
+                events << createEvent(name: "energy", value: cmd.scaledMeterValue, unit: "kVAh")
+                break
+            case 2:
+                events << createEvent(name: "power", value: Math.round(cmd.scaledMeterValue), unit: "W")
+                break
+            default:
+                events << createEvent(name: "electric", value: cmd.scaledMeterValue, unit: ["pulses", "V", "A", "R/Z", ""][cmd.scale - 3])
+        }
 	}
+    return events
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.sensormultilevelv5.SensorMultilevelReport cmd){
@@ -204,7 +195,7 @@ def zwaveEvent(physicalgraph.zwave.commands.sensormultilevelv5.SensorMultilevelR
 	switch (cmd.sensorType) {
 		case 4:
 			map.name = "power"
-            map.value = cmd.scaledSensorValue.toInteger().toString()
+            map.value = Math.round(cmd.scaledSensorValue)
             map.unit = cmd.scale == 1 ? "Btu/h" : "W"
             break
 		default:
@@ -242,7 +233,6 @@ def refresh() {
     }
 
     state.lastRefresh = now()
-
     commands(cmds)
 }
 
@@ -260,7 +250,7 @@ def ping() {
 
 def setLevel(level) {
 	if(level > 99) level = 99
-    if(level < 1) level = 1
+    if(level < 1) level = 1 // TODO investigate 0 or 1 on the Nano Dimmer
     def cmds = []
     cmds << zwave.basicV1.basicSet(value: level)
     cmds << zwave.switchMultilevelV1.switchMultilevelGet()
@@ -324,7 +314,6 @@ def generate_preferences(configuration_model)
     }
 }
 
-
 def update_tiles() {
     def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
     def wireLoadText = ""
@@ -340,11 +329,20 @@ def update_tiles() {
         def edgeValue = convertParam(129, cmd2Integer(cachedDeviceParameters?."129"))
         wireLoadText = wireLoadText + (edgeValue == 0 ? "Trailing-edge" : "Leading-edge")
     }
-    sendEvent(name: "wireLoad", value: wireLoadText.trim(), displayed:false)
+    sendEvent(name: "wireLoad", value: wireLoadText.trim(), displayed: false, isStateChange: true)
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.configurationv1.ConfigurationReport cmd) {
+     update_cached_device_parameters(cmd)
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.configurationv2.ConfigurationReport cmd) {
+     update_cached_device_parameters(cmd)
 }
 
 def update_cached_device_parameters(cmd)
 {
+    logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
     def cmdParamNum = "${cmd.parameterNumber}".toInteger()
     def cmdParamValue = cmd2Integer(cmd.configurationValue)
     def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
@@ -362,11 +360,12 @@ def update_cached_device_parameters(cmd)
     {
         if (settings."${cmd.parameterNumber}".toInteger() == convertParam(cmdParamNum, cmdParamValue))
         {
-            sendEvent(name:"needUpdate", value:"NO", displayed:false, isStateChange: true)
+            //setConfigureOpportunity(false)
         }
         else
         {
-            sendEvent(name:"needUpdate", value:"YES", displayed:false, isStateChange: true)
+            // param value retrieved from device doesn't match user-chosen setting
+            setConfigureOpportunity(true)
         }
     }
 
@@ -378,63 +377,47 @@ def update_cached_device_parameters(cmd)
 
 def update_settings_on_device()
 {
+    logging("Nano Dimmer called update_settings_on_device()")
     def cmds = []
     def cachedDeviceParameters = state.cachedDeviceParameters ?: [:]
 
     def configuration = parseXml(configuration_model())
-    def isUpdateNeeded = "NO"
+    def configureOpportunity = false
 
-    if(!state?.needfwUpdate || state?.needfwUpdate == ""){
+    if(!state?.needfwUpdate) {
        logging("Requesting device firmware version")
        cmds << zwave.firmwareUpdateMdV2.firmwareMdGet()
     }
-    if(!state.association1 || state.association1 == "" || state.association1 == "1"){
-       logging("Setting association group 1")
-       cmds << zwave.associationV1.associationSet(groupingIdentifier:1, nodeId:zwaveHubNodeId)
-       cmds << zwave.associationV1.associationGet(groupingIdentifier:1)
-    }
-    if(!state.association2 || state.association2 == "" || state.association1 == "2"){
-       logging("Setting association group 2")
-       cmds << zwave.associationV1.associationSet(groupingIdentifier:2, nodeId:zwaveHubNodeId)
-       cmds << zwave.associationV1.associationGet(groupingIdentifier:2)
-    }
+
+    cmds << zwave.associationV1.associationSet(groupingIdentifier:1, nodeId:zwaveHubNodeId)
+    cmds << zwave.associationV1.associationGet(groupingIdentifier:1)
+    cmds << zwave.associationV1.associationSet(groupingIdentifier:2, nodeId:zwaveHubNodeId)
+    cmds << zwave.associationV1.associationGet(groupingIdentifier:2)
 
     configuration.Value.each
     {
-       if ("${it.@setting_type}" == "zwave"){
-       //logging("Flag Placement")
+        if ("${it.@setting_type}" == "zwave") {
             if (cachedDeviceParameters."${it.@index}" == null)
             {
-            //logging("Flag Placement") - Seems to fail here (FAIL)
-                if (device.currentValue("currentFirmware") == null || "${it.@fw}".indexOf(device.currentValue("currentFirmware")) >= 0){
-                    isUpdateNeeded = "YES"
-                    logging("Current value of parameter ${it.@index} is unknown")
-                    cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
-                }
+                configureOpportunity = true
+                //logging("Device parameter ${it.@index} is unknown; requesting current value from device")
+                cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
             }
             else if (!it.@readonly.isEmpty() && it.@readonly.toBoolean()) {
-                if (state.lastRefresh == null || (now() - state.lastRefresh > 600000)) {
-                    logging("Device parameter ${it.@index} is read-only, request current value from device")
-                    cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
-                }
+                cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
             }
             else if (settings."${it.@index}" != null && (convertParam(it.@index.toInteger(), cmd2Integer(cachedDeviceParameters."${it.@index}")) != settings."${it.@index}".toInteger()))
             {
-            //logging("Flag Placement")
-                //if (device.currentValue("currentFirmware") == null || "${it.@fw}".indexOf(device.currentValue("currentFirmware")) >= 0){
-                    isUpdateNeeded = "YES"
-
-                    logging("Parameter ${it.@index} will be updated to " + settings."${it.@index}")
-                    def convertedConfigurationValue = convertParam(it.@index.toInteger(), settings."${it.@index}".toInteger())
-                    cmds << zwave.configurationV1.configurationSet(configurationValue: integer2Cmd(convertedConfigurationValue, it.@byteSize.toInteger()), parameterNumber: it.@index.toInteger(), size: it.@byteSize.toInteger())
-                    cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
-                //}
+                //logging("Device parameter ${it.@index} will be updated to " + settings."${it.@index}")
+                //configureOpportunity = true
+                def convertedConfigurationValue = convertParam(it.@index.toInteger(), settings."${it.@index}".toInteger())
+                cmds << zwave.configurationV1.configurationSet(configurationValue: integer2Cmd(convertedConfigurationValue, it.@byteSize.toInteger()), parameterNumber: it.@index.toInteger(), size: it.@byteSize.toInteger())
+                cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
             }
         }
     }
 
-    state.lastRefresh = now()
-    sendEvent(name:"needUpdate", value: isUpdateNeeded, displayed:false, isStateChange: true)
+    setConfigureOpportunity(configureOpportunity)
     return cmds
 }
 
@@ -484,16 +467,6 @@ def integer2Cmd(value, size) {
 	}
 }
 
-def zwaveEvent(physicalgraph.zwave.commands.configurationv1.ConfigurationReport cmd) {
-     update_cached_device_parameters(cmd)
-     logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
-}
-
-def zwaveEvent(physicalgraph.zwave.commands.configurationv2.ConfigurationReport cmd) {
-     update_cached_device_parameters(cmd)
-     logging("${device.displayName} parameter '${cmd.parameterNumber}' with a byte size of '${cmd.size}' is currently set to '${cmd2Integer(cmd.configurationValue)}'")
-}
-
 def zwaveEvent(physicalgraph.zwave.commands.firmwareupdatemdv2.FirmwareMdReport cmd){
     logging("Firmware Report ${cmd.toString()}")
     def firmwareVersion
@@ -504,50 +477,65 @@ def zwaveEvent(physicalgraph.zwave.commands.firmwareupdatemdv2.FirmwareMdReport 
        default:
           firmwareVersion = cmd.checksum
     }
-    state.needfwUpdate = "false"
-    updateDataValue("firmware", firmwareVersion.toString())
-    createEvent(name: "currentFirmware", value: firmwareVersion)
+    state.needfwUpdate = false
+    createEvent(name: "firmware", value: firmwareVersion.toString(), displayed: false, isStateChange: true)
 }
 
 def installed() {
     log.debug "Nano Dimmer called installed()"
-    state.clear()
+    migrate()
     def zwaveInfo = getZwaveInfo()  // https://community.smartthings.com/t/new-z-wave-fingerprint-format/48204/39
-    if (zwaveInfo.zw.endsWith("s")) {
+    if (zwaveInfo?.zw?.endsWith("s")) {
         // device was included securely
         logging("Nano Dimmer included securely")
         state.sec = 1
     }
+    else {
+        logging("Nano Dimmer included non-securely")
+        state.sec = 0
+    }
+    // Device-Watch simply pings if no device events received for 122min (7320 seconds)
+    sendEvent(name: "checkInterval", value: 7320, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
 }
 
-// Event by capability.configuration
-// called: a) one-time after the device has been assigned a Device Handler
-// and     b) when the configure tile is clicked
+def migrate() {
+    // stop using undocumented DataValue storage; use instead state and device attributes
+    if (getDataValue("firmware") != null) {
+        updateDataValue("firmware", null)   // no known remove/delete
+    }
+    state.clear()
+}
+
+// Removed capability.configuration in metadata because it was causing duplicate calls since it called configure() and then
+// core SmartThings called update(). Easy fix was to remove capability.configuration and instead just create a custom command
 def configure() {
-    logging("Configuring Device For SmartThings Use")
-    def cmds = []
-
-    cmds = update_settings_on_device()
-
-    if (cmds != []) commands(cmds)
-    //else logging("Configuring Device Failed")
+    logging("Nano Dimmer called configure()")
+    def cmds = update_settings_on_device()
+    commands(cmds)
 }
 
-// called after the settings/preferences page is saved
-// BUGBUG aalso on first install, therefore causes update_settings_on_device() to be called twice
+// called after the app settings/preferences page is saved *and* on first install of device handler to device
 def updated()
 {
-    logging("updated() is being called")
-    sendEvent(name: "checkInterval", value: 2 * 30 * 60 + 2 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID])
-    state.needfwUpdate = ""
-
-    def cmds = update_settings_on_device()
-
-    sendEvent(name:"needUpdate", value: device.currentValue("needUpdate"), displayed:false, isStateChange: true)
-
-    response(commands(cmds))
+    logging("Nano Dimmer called updated()")
+    response(configure())
 }
 
+// accepts param of boolean: true or false
+def setConfigureOpportunity(configure) {
+    if (configure != hasConfigureOpportunity()) {
+        sendEvent(name:"configureOpportunity", value:(configure ? "true" : "false"), displayed: false, isStateChange: true)
+    }
+}
+
+def hasConfigureOpportunity() {
+    device.currentValue("configureOpportunity") == "true"
+}
+
+// BUGBUG param 131 (min dim setting) does not correspond to the non modified power level.
+// e.g. I wanted 48-99 as my range. When I set 131=48, the dimming was almost imperceptable
+// I had to set 131=22 to get the effect I wanted. Strange...is there a power of 2
+// bug here? Because 48 / 2 is 24 which is ~22
 def convertParam(number, value) {
 	switch (number){
     	case 201:
@@ -623,11 +611,11 @@ def configuration_model()
       </Value>
       <Value type="list" byteSize="1" index="80" label="Instant Notification" min="0" max="4" value="3" setting_type="zwave" fw="">
         <Help>
-        Notification report of status change sent to Group Assocation #1 when state of output load changes. Used to instantly update status to your gateway typically.
+        Notification report of status change sent to association group 1 when state of output load changes. Used to instantly update status to your gateway typically.
             0 - Nothing
             1 - Hail CC (uses more bandwidth)
             2 - Basic Report CC (ON/OFF style status report)
-            3 - Multilevel Switch Report (Used for Dimmers status reports)
+            3 - Multilevel Switch Report (Used for dimmer status reports)
             4 - Hail CC when external switch is used to change status of either load.
             Range: 0~4
             Default: 3
@@ -781,9 +769,9 @@ def configuration_model()
             <Item label="Momentary Push Button Mode" value="3" />
             <Item label="Automatic Identification" value="4" />
       </Value>
-      <Value type="list" byteSize="1" index="123" label="Control Destination of S1 (Group Association #3)" min="1" max="3" value="3" setting_type="zwave" fw="">
+      <Value type="list" byteSize="1" index="123" label="Control Destination of S1 (association group 3)" min="1" max="3" value="3" setting_type="zwave" fw="">
         <Help>
-        Set the control destination for external switch S1 for Group Association #3
+        Set the control destination for external switch S1 for association group 3
             1 = control the output loads of itself.
             2 = control the other nodes.
             3 = control the output loads of itself and other nodes.
@@ -794,9 +782,9 @@ def configuration_model()
             <Item label="Control other Nodes Only" value="2" />
             <Item label="Control Load and Other Nodes" value="3" />
       </Value>
-      <Value type="list" byteSize="1" index="124" label="Control Destination of S2 (Group Association #4)" min="1" max="3" value="3" setting_type="zwave" fw="">
+      <Value type="list" byteSize="1" index="124" label="Control Destination of S2 (association group 4)" min="1" max="3" value="3" setting_type="zwave" fw="">
         <Help>
-        Set the control destination for external switch S2 for Group Association #4
+        Set the control destination for external switch S2 for association group 4
             1 = control the output loads of itself.
             2 = control the other nodes.
             3 = control the output loads of itself and other nodes.
@@ -859,7 +847,7 @@ def configuration_model()
       <Value type="byte" byteSize="1" index="131" label="Minimum Dim Setting" min="0" max="99" value="0" setting_type="zwave" fw="">
         <Help>
        		Set the min brightness level that the load can reach to.
-            Note: When the level is determined, this level value will not be reset after exclusion.
+            Note: When the level is set, this level value will not be reset after exclusion.
             Range: 0~99
             Default: 0
         </Help>
@@ -867,7 +855,7 @@ def configuration_model()
       <Value type="byte" byteSize="1" index="132" label="Maximum Dim Setting" min="0" max="99" value="99" setting_type="zwave" fw="">
         <Help>
        		Set the max brightness level that the load can reach to.
-            Note: When the level is determined, this level value will not be reset after exclusion.
+            Note: When the level is set, this level value will not be reset after exclusion.
             Range: 0~99
             Default: 99
         </Help>
