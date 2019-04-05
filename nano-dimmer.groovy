@@ -35,17 +35,20 @@ metadata {
 
         command "configure"
 
-        fingerprint mfr: "0086", prod: "0103", model: "006F"
+        fingerprint mfr: "0086", prod: "0003", model: "006F"
+        fingerprint mfr: "006A", prod: "0003", model: "006F"
 		fingerprint deviceId: "0x1101", inClusters: "0x5E,0x25,0x27,0x32,0x81,0x71,0x2C,0x2B,0x70,0x86,0x72,0x73,0x85,0x59,0x98,0x7A,0x5A"
 	}
 
     preferences {
-        input description: "Once you change values on this page, the corner of the \"configuration\" icon will change orange until all configuration parameters are updated.",
+        input (
             title: "Settings",
+            description: "The corner of the \"configuration\" tile will be orange if configuration is not complete. Press the tile to finish configuration.",
             displayDuringSetup: false,
             type: "paragraph",
             element: "paragraph"
-		generate_preferences(configuration_model())
+        )
+        generate_preferences(configuration_model())
     }
 
 	simulator {
@@ -92,7 +95,7 @@ metadata {
 def parse(String description) {
     def result = null
 	if (description.startsWith("Err")) {
-	    result = createEvent(descriptionText: description, isStateChange: true)
+	    result = createEvent(descriptionText: description, displayed: true)
 	} else if (description != "updated") {
 		def cmd = zwave.parse(description, [0x20: 1, 0x84: 1, 0x98: 1, 0x56: 1, 0x60: 3])
 		if (cmd) {
@@ -162,35 +165,42 @@ def zwaveEvent(physicalgraph.zwave.Command cmd) {
 
 def zwaveEvent(physicalgraph.zwave.commands.meterv3.MeterReport cmd) {
 	logging(cmd)
-    def events = []
 	if (cmd.meterType == 1) {
-        switch (cmd.scale)
-        {
-            case 0:
-                events << createEvent(name: "energy", value: cmd.scaledMeterValue, unit: "kWh")
-                break
-            case 1:
-                events << createEvent(name: "energy", value: cmd.scaledMeterValue, unit: "kVAh")
-                break
-            case 2:
-                events << createEvent(name: "power", value: Math.round(cmd.scaledMeterValue), unit: "W")
-                break
-            default:
-                events << createEvent(name: "electric", value: cmd.scaledMeterValue, unit: ["pulses", "V", "A", "R/Z", ""][cmd.scale - 3])
-        }
-	}
-    return events
+        def map = [ displayed: true ]
+        map << ([
+            [ name: "energy", unit: "kWh", value: cmd.scaledMeterValue ],
+            [ name: "energy", unit: "kVAh", value: cmd.scaledMeterValue ],
+            [ name: "power", unit: "W", value: Math.round(cmd.scaledMeterValue)],
+            [ name: "pulse count", unit: "pulses", value: cmd.scaledMeterValue ],
+            [ name: "voltage", unit: "V", value: Math.round(cmd.scaledMeterValue) ],
+            [ name: "current", unit: "A", value: cmd.scaledMeterValue],
+            [ name: "power factor", unit: "R/Z", value: cmd.scaledMeterValue],
+        ][cmd.scale] ?: [ name: "electric" ])
+        return createEvent(map)
+    }
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.sensormultilevelv5.SensorMultilevelReport cmd){
-    logging("SensorMultilevelReport: $cmd")
-	def map = [:]
+    logging(cmd)
+	def map = [displayed: true]
 	switch (cmd.sensorType) {
 		case 4:
 			map.name = "power"
-            map.value = Math.round(cmd.scaledSensorValue)
             map.unit = cmd.scale == 1 ? "Btu/h" : "W"
+            map.value = Math.round(cmd.scaledSensorValue)
             break
+        case 0xF:
+			map.name = "voltage"
+            map.unit = cmd.scale == 1 ? "mV" : "V"
+            map.value = Math.round(cmd.scaledSensorValue)
+		case 0x10:
+			map.name = "current"
+			map.unit = cmd.scale == 1 ? "mA" : "A"
+            if (cmd.scale == 1)
+                map.value = Math.round(cmd.scaledSensorValue)
+            else
+                map.value = cmd.scaledSensorValue
+			break
 		default:
 			map.descriptionText = cmd.toString()
 	}
@@ -269,39 +279,62 @@ def generate_preferences(configuration_model)
         if (!it.@readonly.isEmpty() && it.@readonly.toBoolean()) {
             return;
         }
-        def preselectedValue = it.@value.isEmpty() ? null : "${it.@value}"
-        def trimHelp = it.Help.toString().trim()
-        switch(it.@type)
+        def description = it.Help.isEmpty() ? [] : [it.Help.toString().replaceAll("[ \t]*[\n\r]+[ \t]*", "\n").trim()]
+        def range = (it.@min != null && it.@max != null) ? "${it.@min}..${it.@max}" : null
+
+        if (!it.@value.isEmpty()) {
+            if (it.@type == "list") {
+                description << "Default: " + it.Item.find {opt -> opt.@value == it.@value}?.@label
+            }
+            else {
+                description << "Default: " + it.@value.toString()
+            }
+        }
+        description = "${it.@label}" + (description.size() ? " ----------\n" + description.join("\n") : "")
+        def displayDuringSetup = it.@displayDuringSetup.isEmpty() ? false : it.@displayDuringSetup.toBoolean()
+        switch (it.@type)
         {
             case ["byte","short","four"]:
-                input "${it.@index}", "number",
-                    title:"${it.@label}\n" + trimHelp,
-                    range: "${it.@min}..${it.@max}",
-                    defaultValue: preselectedValue,
-                    displayDuringSetup: "${it.@displayDuringSetup}"
-            break
+                input (
+                    name: "${it.@index}",
+                    title: description,
+                    type: "number",
+                    range: range,
+                    defaultValue: it.@value.isEmpty() ? null : "${it.@value.toInteger()}",  // must provide string due to SmartThings bug to display decimal number instead
+                    displayDuringSetup: displayDuringSetup
+                )
+                break
             case "list":
                 def items = []
-                it.Item.each { items << ["${it.@value}":"${it.@label}"] }
-                input "${it.@index}", "enum",
-                    title:"${it.@label}\n" + trimHelp,
-                    defaultValue: preselectedValue,
-                    displayDuringSetup: "${it.@displayDuringSetup}",
-                    options: items
-            break
+                it.Item.each { opt -> items << ["${opt.@value}":"${opt.@label}"] }
+                input (
+                    name: "${it.@index}",
+                    title: description,
+                    type: "enum",
+                    options: items,
+                    defaultValue: it.@value.isEmpty() ? null : "${it.@value}",
+                    displayDuringSetup: displayDuringSetup
+                )
+                break
             case "decimal":
-               input "${it.@index}", "decimal",
-                    title:"${it.@label}\n" + trimHelp,
-                    range: "${it.@min}..${it.@max}",
-                    defaultValue: preselectedValue,
-                    displayDuringSetup: "${it.@displayDuringSetup}"
-            break
+                input (
+                    name: "${it.@index}",
+                    title: description,
+                    type: "decimal",
+                    range: range,
+                    defaultValue: it.@value.isEmpty() ? null : it.@value.toFloat(),
+                    displayDuringSetup: displayDuringSetup
+                )
+                break
             case "boolean":
-               input "${it.@index}", "boolean",
-                    title:"${it.@label}\n" + trimHelp,
-                    defaultValue: preselectedValue,
-                    displayDuringSetup: "${it.@displayDuringSetup}"
-            break
+                input (
+                    name: "${it.@index}",
+                    title: description,
+                    type: "bool",
+                    defaultValue: it.@value.isEmpty() ? null : it.@value.toBoolean(),
+                    displayDuringSetup: displayDuringSetup
+                )
+                break
         }
     }
 }
@@ -350,7 +383,7 @@ def update_cached_device_parameters(cmd)
 
     if ((readonly_parameter == false) && (settings."${cmd.parameterNumber}" != null))
     {
-        if (settings."${cmd.parameterNumber}".toInteger() == convertParam(cmdParamNum, cmdParamValue))
+        if (coerceToInteger(settings."${cmd.parameterNumber}") == convertParam(cmdParamNum, cmdParamValue))
         {
             //setConfigureOpportunity(false)
         }
@@ -402,11 +435,11 @@ def update_settings_on_device()
             else if (!it.@readonly.isEmpty() && it.@readonly.toBoolean()) {
                 cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
             }
-            else if (settings."${it.@index}" != null && (convertParam(it.@index.toInteger(), cmd2Integer(cachedDeviceParameters."${it.@index}")) != settings."${it.@index}".toInteger()))
+            else if (settings."${it.@index}" != null && (convertParam(it.@index.toInteger(), cmd2Integer(cachedDeviceParameters."${it.@index}")) != coerceToInteger(settings."${it.@index}")))
             {
                 //logging("Device parameter ${it.@index} will be updated to " + settings."${it.@index}")
                 //configureOpportunity = true
-                def convertedConfigurationValue = convertParam(it.@index.toInteger(), settings."${it.@index}".toInteger())
+                def convertedConfigurationValue = convertParam(it.@index.toInteger(), coerceToInteger(settings."${it.@index}"))
                 cmds << zwave.configurationV1.configurationSet(configurationValue: integer2Cmd(convertedConfigurationValue, it.@byteSize.toInteger()), parameterNumber: it.@index.toInteger(), size: it.@byteSize.toInteger())
                 cmds << zwave.configurationV1.configurationGet(parameterNumber: it.@index.toInteger())
             }
@@ -415,6 +448,12 @@ def update_settings_on_device()
 
     setConfigureOpportunity(configureOpportunity)
     return cmds
+}
+
+def coerceToInteger(candidate) {
+    if (candidate instanceof Boolean)
+        return candidate ? 1 : 0
+    return candidate.toInteger()
 }
 
 /**
@@ -559,294 +598,196 @@ def configuration_model()
 {
 '''
 <configuration>
-	  <Value type="list" byteSize="1" index="4" label="Overheat Protection." min="0" max="1" value="0" setting_type="zwave" fw="">
+    <Value type="boolean" byteSize="1" index="4" label="Overheat Protection" min="0" max="1" value="false" setting_type="zwave" fw="">
         <Help>
-        The output load will automatically turn off after 30 seconds if temperature is over 100 C.
-            0 - Disable
-            1 - Enable
-            Range: 0~1
-            Default: 0
+            Turn off after 30 seconds if temperature is over 100 C
         </Help>
-            <Item label="Disable" value="0" />
-            <Item label="Enable" value="1" />
-      </Value>
-      <Value type="list" byteSize="1" index="20" label="Dual Nano after power outage" min="0" max="2" value="0" setting_type="zwave" fw="">
+    </Value>
+    <Value type="list" byteSize="1" index="20" label="After Power Loss" min="0" max="2" value="0" setting_type="zwave" fw="">
         <Help>
-        Configure the output load status after re-power from a power outage.
-            0 - Last status before power outage.
-            1 - Always ON
-            2 - Always OFF
-            Range: 0~2
-            Default: 0
+            When power is lost, then restored, the dimmer is...
         </Help>
-            <Item label="Last Status" value="0" />
-            <Item label="Always On" value="1" />
-            <Item label="Always Off" value="2" />
-      </Value>
-      <Value type="list" byteSize="1" index="80" label="Instant Notification" min="0" max="4" value="3" setting_type="zwave" fw="">
+        <Item label="Same as before loss" value="0" />
+        <Item label="Always on" value="1" />
+        <Item label="Always off" value="2" />
+    </Value>
+
+    <Value type="list" byteSize="1" index="80" label="Instant Updates" min="0" max="4" value="3" setting_type="zwave" fw="">
         <Help>
-        Notification report of status change sent to association group 1 when state of output load changes. Used to instantly update status to your gateway typically.
-            0 - Nothing
-            1 - Hail CC (uses more bandwidth)
-            2 - Basic Report CC (ON/OFF style status report)
-            3 - Multilevel Switch Report (Used for dimmer status reports)
-            4 - Hail CC when external switch is used to change status of either load.
-            Range: 0~4
-            Default: 3
+            Type of report sent to association group 1 when dimmer changes. Used to instantly update dimmer status on gateway
         </Help>
-            <Item label="None" value="0" />
-            <Item label="Hail CC" value="1" />
-            <Item label="Basic Report CC" value="2" />
-            <Item label="Multilevel Switch Report" value="3" />
-            <Item label="Hail when External Switch used" value="4" />
-      </Value>
-      <Value type="list" byteSize="1" index="81" label="Notification send with S1 Switch" min="0" max="1" value="1" setting_type="zwave" fw="">
+        <Item label="None" value="0" />
+        <Item label="Hail (outdated, more bandwidth)" value="1" />
+        <Item label="Basic (simple on/off)" value="2" />
+        <Item label="Multilevel (for dimmers)" value="3" />
+        <Item label="Hail with external switch" value="4" />
+    </Value>
+    <Value type="boolean" byteSize="1" index="90" label="Power Usage Report" min="0" max="1" value="false" setting_type="zwave" fw="">
         <Help>
-        To set which notification would be sent to the associated nodes in association group 3 when using the external switch 1 to switch the loads.
-            0 = Send Nothing
-            1 = Basic Set CC.
-            Range: 0~1
-            Default: 1
+            Enable the two power usage reports (below)
         </Help>
-            <Item label="Nothing" value="0" />
-            <Item label="Basic Set CC" value="1" />
-      </Value>
-      <Value type="list" byteSize="1" index="82" label="Notification send with S2 Switch" min="0" max="1" value="1" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="2" index="91" label="Power Usage (watts)" min="0" max="60000" value="25" setting_type="zwave" fw="">
         <Help>
-        To set which notification would be sent to the associated nodes in association group 4 when using the external switch 2 to switch the loads.
-            0 = Send Nothing
-            1 = Basic Set CC.
-            Range: 0~1
-            Default: 1
+            Send report when power usage (watts) changes more than...
         </Help>
-            <Item label="Nothing" value="0" />
-            <Item label="Basic Set CC" value="1" />
-      </Value>
-      <Value type="list" byteSize="1" index="90" label="Watt Threshold Enable/Disable" min="0" max="1" value="1" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="1" index="92" label="Power Usage (%)" min="0" max="100" value="5" setting_type="zwave" fw="">
         <Help>
-       		Enables/disables both watt thresholds below:
-            0 = disabled
-            1 = enabled
-            Range: 0~1
-            Default: 1
+            Send report when power usage (percentage) changes more than...
         </Help>
-            <Item label="Disable" value="0" />
-            <Item label="Enable" value="1" />
-      </Value>
-      <Value type="byte" byteSize="4" index="91" label="Watt Absolute Threshold" min="0" max="60000" value="25" setting_type="zwave" fw="">
+    </Value>
+
+    <Value type="byte" byteSize="4" index="101" label="Timed Report 1" min="0" max="255" value="12" setting_type="zwave" fw="">
         <Help>
-       		The value here represents minimum change in wattage (in terms of wattage) for a REPORT to be sent (Valid values 0-60000).
-            Range: 0~60000
-            Default: 25
+            Includes data:
+            1 = Voltage
+            2 = Current
+            4 = Watt
+            8 = kWh
+            Example: If you want only Watt and kWh in this report, sum the values together 8+4=12
         </Help>
-      </Value>
-      <Value type="byte" byteSize="1" index="92" label="Watt Percent Threshold" min="0" max="100" value="5" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="4" index="111" label="Timed Report 1 Schedule" min="1" max="2147483647" value="240" setting_type="zwave" fw="">
         <Help>
-       		The value here represents minimum change in wattage percent (in terms of percentage %) for a REPORT to be sent.
-            Range: 0~100
-            Default: 5
+            Delay in seconds between each report
         </Help>
-      </Value>
-      <Value type="byte" byteSize="4" index="101" label="(Group 1) Timed Automatic Reports" min="0" max="255" value="12" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="4" index="102" label="Timed Report 2" min="0" max="255" value="0" setting_type="zwave" fw="">
         <Help>
-       		Sets the sensor report for kWh, Watt, Voltage, or Current.
-            Value Identifiers-
-                1 = Voltage
-                2 = Current
-                4 = Watt
-                8 = kWh
-            Example: If you want only Watt and kWh to report, sum the value identifiers together for Watt and kWh. 8 + 4 = 12, therefore entering 12 into this setting will give you Watt + kWh reports if set.
-            Range: 0~255
-            Default: 12
+            Includes data:
+            1 = Voltage
+            2 = Current
+            4 = Watt
+            8 = kWh
+            Example: If you want only voltage and current in this report, sum the values together 1+2=3
         </Help>
-      </Value>
-      <Value type="byte" byteSize="4" index="102" label="(Group 2) Timed Automatic Reports" min="0" max="255" value="0" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="4" index="112" label="Timed Report 2 Schedule" min="1" max="2147483647" value="3600" setting_type="zwave" fw="">
         <Help>
-       		Sets the sensor report for kWh, Watt, Voltage, or Current.
-            Value Identifiers-
-                1 = Voltage
-                2 = Current
-                4 = Watt
-                8 = kWh
-            Example: If you want only Voltage and Current to report, sum the value identifiers together for Voltage + Current. 1 + 2 = 3, therefore entering 3 into this setting will give you Voltage + Current reports if set.
-            Range: 0~255
-            Default: 0
+            Delay in seconds between each report
         </Help>
-      </Value>
-      <Value type="byte" byteSize="4" index="103" label="(Group 3) Timed Automatic Reports" min="0" max="255" value="0" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="4" index="103" label="Timed Report 3" min="0" max="255" value="0" setting_type="zwave" fw="">
         <Help>
-       		Sets the sensor report for kWh, Watt, Voltage, or Current.
-            Value Identifiers-
-                1 = Voltage
-                2 = Current
-                4 = Watt
-                8 = kWh
-            Example: If you want all values to report, sum the value identifiers together for Voltage + Current + Watt + kWh. 1 + 2 + 4 + 8 = 15, therefore entering 15 into this setting will give you Voltage + Current + Watt + kWh reports if set.
-            Range: 0~255
-            Default: 0
+            Includes data:
+            1 = Voltage
+            2 = Current
+            4 = Watt
+            8 = kWh
+            Example: If you want all data, sum the values together 1+2+4+8=15
         </Help>
-      </Value>
-      <Value type="byte" byteSize="4" index="111" label="(Group 1) Set Report in Seconds" min="1" max="2147483647" value="240" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="4" index="113" label="Timed Report 3 Schedule" min="1" max="2147483647" value="3600" setting_type="zwave" fw="">
         <Help>
-       		Set the interval of automatic report for Report group 1 in (seconds). This controls (Group 1) Timed Automatic Reports.
-            Range: 0~2147483647
-            Default: 240
+            Delay in seconds between each report
         </Help>
-      </Value>
-      <Value type="byte" byteSize="4" index="112" label="(Group 2) Set Report in Seconds" min="1" max="2147483647" value="3600" setting_type="zwave" fw="">
+    </Value>
+
+    <Value type="list" byteSize="1" index="120" label="S1 Switch Type" min="0" max="4" value="0" setting_type="zwave" fw="">
         <Help>
-       		Set the interval of automatic report for Report group 2 in (seconds). This controls (Group 2) Timed Automatic Reports.
-            Range: 0~2147483647
-            Default: 3600
+            External S1 switch type...
+            Note: Not reset after exclusion
         </Help>
-      </Value>
-      <Value type="byte" byteSize="4" index="113" label="(Group 3) Set Report in Seconds" min="1" max="2147483647" value="3600" setting_type="zwave" fw="">
+        <Item label="Unidentified" value="0" />
+        <Item label="2-state switch" value="1" />
+        <Item label="3-way switch" value="2" />
+        <Item label="Momentary push button" value="3" />
+        <Item label="Automatic detection" value="4" />
+    </Value>
+    <Value type="list" byteSize="1" index="123" label="S1 Switch Control" min="1" max="3" value="3" setting_type="zwave" fw="">
         <Help>
-       		Set the interval of automatic report for Report group 3 in (seconds). This controls (Group 3) Timed Automatic Reports.
-            Range: 0~2147483647
-            Default: 3600
+            External switch S1 controls...
         </Help>
-      </Value>
-      <Value type="list" byteSize="1" index="120" label="External Switch S1 Setting" min="0" max="4" value="0" setting_type="zwave" fw="">
+        <Item label="Dimmer itself" value="1" />
+        <Item label="Devices in association group 3" value="2" />
+        <Item label="Dimmer itself and devices in association group 3" value="3" />
+    </Value>
+    <Value type="boolean" byteSize="1" index="81" label="S1 Switch Notification" min="0" max="1" value="true" setting_type="zwave" fw="">
         <Help>
-        Configure the external switch mode for S1 via Configuration Set.
-            0 = Unidentified mode.
-            1 = 2-state switch mode.
-            2 = 3-way switch mode.
-            3 = momentary switch button mode.
-            4 = Enter automatic identification mode. //can enter this mode by tapping internal button 4x times within 2 seconds.
-            Note: When the mode is determined, this mode value will not be reset after exclusion.
-            Range: 0~4
-            Default: 0
+            External S1 switch sends Basic Set CC to association group 3
         </Help>
-            <Item label="Unidentified" value="0" />
-            <Item label="2-State Switch Mode" value="1" />
-            <Item label="3-way Switch Mode" value="2" />
-            <Item label="Momentary Push Button Mode" value="3" />
-            <Item label="Automatic Identification" value="4" />
-      </Value>
-      <Value type="list" byteSize="1" index="121" label="External Switch S2 Setting" min="0" max="4" value="0" setting_type="zwave" fw="">
+    </Value>
+    <Value type="list" byteSize="1" index="121" label="S2 Switch Type" min="0" max="4" value="0" setting_type="zwave" fw="">
         <Help>
-        Configure the external switch mode for S2 via Configuration Set.
-            0 = Unidentified mode.
-            1 = 2-state switch mode.
-            2 = 3-way switch mode.
-            3 = momentary switch button mode.
-            4 = Enter automatic identification mode. //can enter this mode by tapping internal button 6x times within 2 seconds.
-            Note: When the mode is determined, this mode value will not be reset after exclusion.
-            Range: 0~4
-            Default: 0
+            External S2 switch type...
+            Note: Not reset after exclusion
         </Help>
-            <Item label="Unidentified" value="0" />
-            <Item label="2-State Switch Mode" value="1" />
-            <Item label="3-way Switch Mode" value="2" />
-            <Item label="Momentary Push Button Mode" value="3" />
-            <Item label="Automatic Identification" value="4" />
-      </Value>
-      <Value type="list" byteSize="1" index="123" label="Control Destination of S1 (association group 3)" min="1" max="3" value="3" setting_type="zwave" fw="">
+        <Item label="Unidentified" value="0" />
+        <Item label="2-state switch" value="1" />
+        <Item label="3-way switch" value="2" />
+        <Item label="Momentary push button" value="3" />
+        <Item label="Automatic detection" value="4" />
+    </Value>
+    <Value type="list" byteSize="1" index="124" label="S2 Switch Control" min="1" max="3" value="3" setting_type="zwave" fw="">
         <Help>
-        Set the control destination for external switch S1 for association group 3
-            1 = control the output loads of itself.
-            2 = control the other nodes.
-            3 = control the output loads of itself and other nodes.
-            Range: 1~3
-            Default: 3
+            External switch S2 controls...
         </Help>
-            <Item label="Control Load Only" value="1" />
-            <Item label="Control other Nodes Only" value="2" />
-            <Item label="Control Load and Other Nodes" value="3" />
-      </Value>
-      <Value type="list" byteSize="1" index="124" label="Control Destination of S2 (association group 4)" min="1" max="3" value="3" setting_type="zwave" fw="">
+        <Item label="Dimmer itself" value="1" />
+        <Item label="Devices in association group 4" value="2" />
+        <Item label="Dimmer itself and devices in association group 4" value="3" />
+    </Value>
+    <Value type="boolean" byteSize="1" index="82" label="S2 Switch Notification" min="0" max="1" value="true" setting_type="zwave" fw="">
         <Help>
-        Set the control destination for external switch S2 for association group 4
-            1 = control the output loads of itself.
-            2 = control the other nodes.
-            3 = control the output loads of itself and other nodes.
-            Range: 1~3
-            Default: 3
+            External S2 switch sends Basic Set CC to association group 4
         </Help>
-            <Item label="Control Load Only" value="1" />
-            <Item label="Control other Nodes Only" value="2" />
-            <Item label="Control Load and Other Nodes" value="3" />
-      </Value>
-      <Value type="byte" byteSize="1" index="125" label="Dimming Ramp Speed" min="1" max="255" value="3" setting_type="zwave" fw="">
+    </Value>
+
+    <Value type="byte" byteSize="1" index="125" label="Dimming speed" min="1" max="255" value="3" setting_type="zwave" fw="">
         <Help>
-       		Set the default dimming rate in seconds.
-            Range: 1~255
-            Default: 3
+            Dimming speed in seconds
         </Help>
-      </Value>
-      <Value type="list" byteSize="1" index="128" label="Wiring Mode" min="0" max="2" value="0" setting_type="zwave" fw="" readonly="true">
+    </Value>
+    <Value type="byte" byteSize="1" index="131" label="Dimming Minimum" min="0" max="99" value="0" setting_type="zwave" fw="">
         <Help>
-            Current auto-detected wiring mode
-            Note: These are READ-ONLY and can not be changed. When detected, it will not be reset after exclusion.
-            0 = Unknown
-            1 = 2-wire mode
-            2 = 3-wire mode
-            Range: 0~2
-            Default: 0
+            Minimum dimmer range
+            Note: Not reset after exclusion
+            Range: 0~99
         </Help>
-            <Item label="Unknown" value="0" />
-            <Item label="2-wire mode" value="1" />
-            <Item label="3-wire mode" value="2" />
-      </Value>
-      <Value type="list" byteSize="1" index="129" label="Dimming Principle" min="0" max="1" setting_type="zwave" fw="">
+    </Value>
+    <Value type="byte" byteSize="1" index="132" label="Dimming Maximum" min="0" max="99" value="99" setting_type="zwave" fw="">
         <Help>
-            Set the dimming principle.
-            Note: This will not be reset after exclusion.
-            0 = Trailing-edge mode (often LED loads)
-            1 = Leading-edge mode (often legacy loads)
-            Range: 0~1
-            Default: 1
+            Maximum dimmer range
+            Note: Not reset after exclusion
+            Range: 0~99
         </Help>
-            <Item label="Trailing-edge mode" value="0" />
-            <Item label="Leading-edge mode" value="1" />
-      </Value>
-      <Value type="list" byteSize="1" index="130" label="Load Type" min="0" max="3" value="0" setting_type="zwave" fw="" readonly="true">
+    </Value>
+    <Value type="list" byteSize="1" index="129" label="Dimming mode" min="0" max="1" setting_type="zwave" fw="">
+        <Help>
+            Override the dimming mode to be trailing- or leading-edge
+            Note: Not reset after exclusion
+        </Help>
+        <Item label="Trailing-edge (LEDs)" value="0" />
+        <Item label="Leading-edge (legacy loads)" value="1" />
+    </Value>
+
+    <Value type="list" byteSize="1" index="128" label="Wiring Mode" min="0" max="2" value="0" setting_type="zwave" fw="" readonly="true">
+        <Help>
+            Auto-detected wiring mode
+            Note: Not reset after exclusion
+        </Help>
+        <Item label="Unknown" value="0" />
+        <Item label="2-wire mode" value="1" />
+        <Item label="3-wire mode" value="2" />
+    </Value>
+    <Value type="list" byteSize="1" index="130" label="Load Type" min="0" max="3" value="0" setting_type="zwave" fw="" readonly="true">
         <Help>
             Auto-detected load type
-            Note: These are READ-ONLY and can not be changed. When detected, it will not be reset after exclusion.
-            0 = Unknown
-            1 = Resistive load
-            2 = Capacitive load
-            3 = Inductive load
-            Range: 0~3
-            Default: 0
+            Note: Not reset after exclusion
         </Help>
-            <Item label="Unknown" value="0" />
-            <Item label="Resistive load" value="1" />
-            <Item label="Capacitive load" value="2" />
-            <Item label="Inductive load" value="3" />
-      </Value>
-      <Value type="byte" byteSize="1" index="131" label="Minimum Dim Setting" min="0" max="99" value="0" setting_type="zwave" fw="">
+        <Item label="Unknown" value="0" />
+        <Item label="Resistive load" value="1" />
+        <Item label="Capacitive load" value="2" />
+        <Item label="Inductive load" value="3" />
+    </Value>
+    <Value type="list" byteSize="1" index="249" label="Automatic Load Detection" min="0" max="2" value="2" setting_type="zwave" fw="">
         <Help>
-       		Set the min brightness level that the load can reach to.
-            Note: When the level is set, this level value will not be reset after exclusion.
-            Range: 0~99
-            Default: 0
+            Automatic dimmer load and wiring detection is...
         </Help>
-      </Value>
-      <Value type="byte" byteSize="1" index="132" label="Maximum Dim Setting" min="0" max="99" value="99" setting_type="zwave" fw="">
-        <Help>
-       		Set the max brightness level that the load can reach to.
-            Note: When the level is set, this level value will not be reset after exclusion.
-            Range: 0~99
-            Default: 99
-        </Help>
-      </Value>
-      <Value type="list" byteSize="1" index="249" label="Auto-load Detection" min="0" max="2" value="2" setting_type="zwave" fw="">
-        <Help>
-            Set the recognition way of load when Nano Dimmer is powered up from power outage or power cycle.
-            0 = Disable auto-load detection
-            1 = Auto-detect only the first time power is restored to Nano Dimmer
-            2 = Auto-detect every time power is restored to Nano Dimmer
-            Range: 0~2
-            Default: 2
-        </Help>
-            <Item label="Disable auto-load detection" value="0" />
-            <Item label="Auto-detect only first time power restored" value="1" />
-            <Item label="Auto-detect every time power restored" value="2" />
-      </Value>
+        <Item label="Disabled" value="0" />
+        <Item label="Detected only first time power is restored to dimmer" value="1" />
+        <Item label="Always detected when power is restored to dimmer" value="2" />
+    </Value>
 </configuration>
 '''
 }
