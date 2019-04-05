@@ -124,19 +124,20 @@ def dimmerEvents(physicalgraph.zwave.Command cmd) {
     // therefore "dimming levels" for a light are 1-98
     // App UI will display them as 1-98% with 99% never seen in the UI
     // 0% dim is the same as completely off, therefore don't update UI to persist the device's saved dimmer level
+    def levelEvent
     if (cmd.value > 0) {
         def scaledValue = cmd.value > 98 ? 100 : cmd.value
-        result << createEvent(name: "level", value: scaledValue, unit:"%",
+        levelEvent = createEvent(name: "level", value: scaledValue, unit:"%",
             descriptionText:"${device.displayName} dimmed ${scaledValue}%",
             displayed: true)
+        result << levelEvent
     }
 
-    // if switch transitioned on/off, query device for wattage power after 3 seconds
-	if (switchEvent.isStateChange) {
+    // if switch transitioned on/off or changed dim level then query device for wattage power after 3 seconds
+    if (switchEvent.isStateChange || levelEvent?.isStateChange) {
 		result << response(["delay 3000", zwave.meterV2.meterGet(scale: 2).format()])
 	}
-
-	result
+    result
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.associationv2.AssociationReport cmd) {
